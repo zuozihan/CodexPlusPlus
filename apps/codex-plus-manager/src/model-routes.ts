@@ -40,10 +40,9 @@ export function protocolProxyBaseUrl(
 export function isProtocolProxyBaseUrl(baseUrl: string | undefined | null): boolean {
   const value = String(baseUrl ?? "").trim().toLowerCase();
   if (!value) return false;
-  return (
-    (value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:")) &&
-    value.endsWith("/v1")
-  );
+  // 与后端 is_local_protocol_proxy_base_url 对齐：任意 advertise Host 的 http://host:port/v1
+  const pathOk = value.endsWith("/v1") || value.endsWith("/v1/");
+  return pathOk && value.startsWith("http://");
 }
 
 export type RelayModelRouteIssue = {

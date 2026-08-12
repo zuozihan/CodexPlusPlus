@@ -515,6 +515,9 @@ pub struct BackendSettings {
         deserialize_with = "deserialize_protocol_proxy_port"
     )]
     pub protocol_proxy_port: u16,
+    /// true = helper 监听 0.0.0.0（WSL/局域网可达）；false = 仅 127.0.0.1
+    #[serde(rename = "protocolProxyListenAll", default)]
+    pub protocol_proxy_listen_all: bool,
 }
 
 impl Default for BackendSettings {
@@ -581,6 +584,7 @@ impl Default for BackendSettings {
             relay_test_model: default_relay_test_model(),
             protocol_proxy_host: default_protocol_proxy_host(),
             protocol_proxy_port: default_protocol_proxy_port(),
+            protocol_proxy_listen_all: false,
         }
     }
 }
@@ -599,6 +603,15 @@ impl BackendSettings {
             &self.protocol_proxy_host(),
             self.protocol_proxy_port(),
         )
+    }
+
+    /// helper 实际 bind 地址：全网卡 0.0.0.0 或仅本机 127.0.0.1。
+    pub fn protocol_proxy_listen_host(&self) -> String {
+        if self.protocol_proxy_listen_all {
+            "0.0.0.0".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        }
     }
 
     pub fn active_relay_profile(&self) -> RelayProfile {
@@ -1388,6 +1401,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             )),
         );
     }
+    merge_bool_setting(target, source, "protocolProxyListenAll");
 }
 
 fn merge_bool_setting(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
@@ -1500,8 +1514,14 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     ]);
     settings.relay_common_config_contents = crate::relay_config::normalize_config_text(&common);
     settings.relay_context_config_contents = crate::relay_config::normalize_config_text(&context);
+    let proxy_host = settings.protocol_proxy_host();
+    let proxy_port = settings.protocol_proxy_port();
     for profile in &mut settings.relay_profiles {
-        let _ = crate::relay_config::normalize_relay_profile_for_storage(profile);
+        let _ = crate::relay_config::normalize_relay_profile_for_storage_with_proxy(
+            profile,
+            &proxy_host,
+            proxy_port,
+        );
     }
     settings.codex_app_image_overlay_opacity =
         clamp_image_overlay_opacity(settings.codex_app_image_overlay_opacity);
@@ -2776,5 +2796,54 @@ experimental_bearer_token = "sk-existing""#
 
         assert!(!updated.provider_sync_enabled);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn save_rewrites_chat_completions_base_url_with_protocol_proxy_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let store = SettingsStore::new(path);
+        let mut settings = BackendSettings {
+            protocol_proxy_host: "192.168.127.254".to_string(),
+            protocol_proxy_port: 57321,
+            protocol_proxy_listen_all: true,
+            relay_profiles: vec![RelayProfile {
+                id: "chat".to_string(),
+                name: "chat".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+                base_url: "https://api.example.test/v1".to_string(),
+                upstream_base_url: "https://api.example.test/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                relay_mode: RelayMode::PureApi,
+                config_contents: r#"model = "gpt-test"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+base_url = "http://127.0.0.1:57321/v1"
+"#
+                .to_string(),
+                auth_contents: r#"{
+  "OPENAI_API_KEY": "sk-test"
+}
+"#
+                .to_string(),
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+        settings.active_relay_id = "chat".to_string();
+        store.save(&settings).unwrap();
+        let loaded = store.load().unwrap();
+        let profile = &loaded.relay_profiles[0];
+        assert!(
+            profile
+                .config_contents
+                .contains(r#"base_url = "http://192.168.127.254:57321/v1""#),
+            "config_contents={}",
+            profile.config_contents
+        );
+        assert!(!profile.config_contents.contains("127.0.0.1"));
     }
 }

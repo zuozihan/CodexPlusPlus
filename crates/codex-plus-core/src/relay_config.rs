@@ -2286,10 +2286,11 @@ pub fn is_local_protocol_proxy_base_url(base_url: &str) -> bool {
     if value.is_empty() {
         return false;
     }
-    // 兼容默认与自定义 host/port 的本地协议代理地址。
+    // 本地协议代理始终是 http://{host}:{port}/v1（含 127.0.0.1 / 局域网 advertise Host）。
+    // 上游云厂商几乎都是 https；Chat Completions 的真实上游存在 upstream_base_url。
     let lower = value.to_ascii_lowercase();
-    (lower.starts_with("http://127.0.0.1:") || lower.starts_with("http://localhost:"))
-        && lower.ends_with("/v1")
+    let path_ok = lower.ends_with("/v1") || lower.ends_with("/v1/");
+    path_ok && lower.starts_with("http://")
 }
 
 pub fn relay_profile_base_url(profile: &RelayProfile) -> String {
@@ -2458,6 +2459,18 @@ fn complete_relay_profile_config_with_proxy(
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
+    normalize_relay_profile_for_storage_with_proxy(
+        profile,
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_HOST,
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    )
+}
+
+pub fn normalize_relay_profile_for_storage_with_proxy(
+    profile: &mut RelayProfile,
+    proxy_host: &str,
+    proxy_port: u16,
+) -> anyhow::Result<()> {
     let mut seen_models = HashSet::new();
     profile.model_routes = profile
         .model_routes
@@ -2512,7 +2525,8 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         || profile.relay_mode == crate::settings::RelayMode::PureApi
         || profile.official_mix_api_key
     {
-        profile.config_contents = complete_relay_profile_config(profile)?;
+        profile.config_contents =
+            complete_relay_profile_config_with_proxy(profile, proxy_host, proxy_port)?;
     }
     if profile.relay_mode == crate::settings::RelayMode::PureApi
         && profile.auth_contents.trim().is_empty()

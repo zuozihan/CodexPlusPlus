@@ -256,6 +256,7 @@ type BackendSettings = {
   relayTestModel: string;
   protocolProxyHost: string;
   protocolProxyPort: number;
+  protocolProxyListenAll: boolean;
 };
 
 type ZedOpenStrategy = "addToFocusedWorkspace" | "reuseWindow" | "newWindow" | "default";
@@ -885,6 +886,7 @@ const defaultSettings: BackendSettings = {
   relayTestModel: "gpt-5.4-mini",
   protocolProxyHost: "127.0.0.1",
   protocolProxyPort: 57321,
+  protocolProxyListenAll: false,
 };
 
 let currentProtocolProxyBaseUrl = PROTOCOL_PROXY_BASE_URL;
@@ -895,6 +897,37 @@ function setCurrentProtocolProxyBaseUrl(host?: string | null, port?: number | st
 
 function getCurrentProtocolProxyBaseUrl() {
   return currentProtocolProxyBaseUrl || PROTOCOL_PROXY_BASE_URL;
+}
+
+/** Chat Completions / 模型路由：config.toml base_url 必须是协议代理 Host，不能回落 127.0.0.1 默认。 */
+function ensureProtocolProxyBaseUrlInProfile(
+  profile: RelayProfile,
+  host?: string | null,
+  port?: number | string | null,
+): RelayProfile {
+  if (isAggregateRelayProfile(profile)) return profile;
+  const hasRoutes = normalizeRelayModelRoutes(profile.modelRoutes).length > 0;
+  if (profile.protocol !== "chatCompletions" && !hasRoutes) return profile;
+  if (host != null || port != null) {
+    setCurrentProtocolProxyBaseUrl(host, port);
+  }
+  const proxyBaseUrl = getCurrentProtocolProxyBaseUrl();
+  if (!profile.configContents.trim()) {
+    return {
+      ...profile,
+      configContents: buildRelayConfigToml(profile, {
+        includeBearerToken: profile.relayMode !== "pureApi",
+        requiresOpenAiAuth: profile.relayMode !== "pureApi",
+        proxyBaseUrl,
+      }),
+    };
+  }
+  return {
+    ...profile,
+    configContents: setCodexProviderStringKey(profile.configContents, "base_url", proxyBaseUrl, {
+      requiresOpenAiAuth: profile.relayMode !== "pureApi",
+    }),
+  };
 }
 
 export function App() {
@@ -951,6 +984,7 @@ export function App() {
     debugPort: "9229",
     helperHost: "127.0.0.1",
     helperPort: "57321",
+    helperListenAll: false,
   });
   const prevLaunchStatusRef = useRef<string | null>(null);
   const [settingsForm, setSettingsForm] = useState<BackendSettings>({ ...defaultSettings });
@@ -1022,6 +1056,7 @@ export function App() {
         appPath: current.appPath || result.settings.codexAppPath || "",
         helperHost: normalized.protocolProxyHost || current.helperHost || "127.0.0.1",
         helperPort: String(normalized.protocolProxyPort || current.helperPort || 57321),
+        helperListenAll: normalized.protocolProxyListenAll === true,
       }));
       setCurrentProtocolProxyBaseUrl(normalized.protocolProxyHost, normalized.protocolProxyPort);
       if (!silent) showResultNotice(t("设置已加载"), result, { silentSuccess: true });
@@ -1814,6 +1849,7 @@ export function App() {
       ...settingsForm,
       protocolProxyHost: helperHost,
       protocolProxyPort: helperPort,
+      protocolProxyListenAll: launchForm.helperListenAll === true,
     };
     setSettingsForm(nextSettings);
     await run(() => call<SettingsResult>("save_settings", { settings: nextSettings }));
@@ -2041,6 +2077,7 @@ export function App() {
       ...settingsForm,
       protocolProxyHost: (launchForm.helperHost || settingsForm.protocolProxyHost || "127.0.0.1").trim() || "127.0.0.1",
       protocolProxyPort: numberOrDefault(launchForm.helperPort, settingsForm.protocolProxyPort || 57321),
+      protocolProxyListenAll: launchForm.helperListenAll === true,
     });
     setCurrentProtocolProxyBaseUrl(next.protocolProxyHost, next.protocolProxyPort);
     const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
@@ -5245,8 +5282,8 @@ function MaintenanceScreen({
   overview: OverviewResult | null;
   watcher: WatcherResult | null;
   settings: SettingsResult | null;
-  launchForm: { appPath: string; debugPort: string; helperHost: string; helperPort: string };
-  onLaunchFormChange: (next: { appPath: string; debugPort: string; helperHost: string; helperPort: string }) => void;
+  launchForm: { appPath: string; debugPort: string; helperHost: string; helperPort: string; helperListenAll: boolean };
+  onLaunchFormChange: (next: { appPath: string; debugPort: string; helperHost: string; helperPort: string; helperListenAll: boolean }) => void;
   removeOwnedData: boolean;
   onRemoveOwnedDataChange: (value: boolean) => void;
   actions: Actions;
@@ -5347,7 +5384,17 @@ function MaintenanceScreen({
               />
             </Field>
           </div>
-          <small>{t("Chat Completions / 模型路由会把 Codex base_url 写成 http://Host:Helper端口/v1；默认 127.0.0.1:57321。")}</small>
+          <label className="inline-check" style={{ marginTop: 8 }}>
+            <input
+              type="checkbox"
+              checked={launchForm.helperListenAll === true}
+              onChange={(event) =>
+                onLaunchFormChange({ ...launchForm, helperListenAll: event.currentTarget.checked })
+              }
+            />
+            <span>{t("helper 监听 0.0.0.0（WSL/局域网访问）")}</span>
+          </label>
+          <small>{t("协议代理 Host 写入 Codex base_url（WSL 填宿主可达 IP，如 192.168.127.254）。开关控制 helper 绑 127.0.0.1 或 0.0.0.0。默认关闭仅本机。")}</small>
           <Toolbar>
             <Button onClick={() => void actions.launch()}>{t("启动 Codex++")}</Button>
             <Button variant="secondary" onClick={() => void actions.saveManualCodexAppPath()}>
@@ -5983,7 +6030,13 @@ function RelayProfileDetail({
   const saveDraft = async () => {
     if (validationError) return;
     const draftWithWindows = draftWithModelRows();
-    const normalizedDraft = isAggregateRelayProfile(draftWithWindows) ? normalizeAggregateRelayProfile(draftWithWindows, form) : deriveRelayProfileFromFiles(draftWithWindows);
+    let normalizedDraft = isAggregateRelayProfile(draftWithWindows) ? normalizeAggregateRelayProfile(draftWithWindows, form) : deriveRelayProfileFromFiles(draftWithWindows);
+    // 保存时强制用当前设置里的协议代理 Host 写 config base_url（Chat Completions / 模型路由）。
+    normalizedDraft = ensureProtocolProxyBaseUrlInProfile(
+      normalizedDraft,
+      form.protocolProxyHost,
+      form.protocolProxyPort,
+    );
     const next = normalizeSettings(isNew
       ? addRelayProfile(form, normalizedDraft)
       : updateRelayProfile(form, profile.id, normalizedDraft));
@@ -6023,7 +6076,12 @@ function RelayProfileDetail({
   const switchDraft = () => {
     if (isNew || !form.relayProfilesEnabled || validationError) return;
     const draftWithWindows = draftWithModelRows();
-    const normalizedDraft = isAggregateRelayProfile(draftWithWindows) ? normalizeAggregateRelayProfile(draftWithWindows, form) : deriveRelayProfileFromFiles(draftWithWindows);
+    let normalizedDraft = isAggregateRelayProfile(draftWithWindows) ? normalizeAggregateRelayProfile(draftWithWindows, form) : deriveRelayProfileFromFiles(draftWithWindows);
+    normalizedDraft = ensureProtocolProxyBaseUrlInProfile(
+      normalizedDraft,
+      form.protocolProxyHost,
+      form.protocolProxyPort,
+    );
     const previousActiveRelayId = form.activeRelayId;
     const next = syncLegacyRelayFields({
       ...form,
@@ -8494,6 +8552,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexAppStepwiseTimeoutMs: clampNumber(settings.codexAppStepwiseTimeoutMs || 8000, 1000, 60000),
     protocolProxyHost: (settings.protocolProxyHost || defaultSettings.protocolProxyHost).trim() || defaultSettings.protocolProxyHost,
     protocolProxyPort: clampNumber(settings.protocolProxyPort || defaultSettings.protocolProxyPort, 1, 65535),
+    protocolProxyListenAll: settings.protocolProxyListenAll === true,
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,
@@ -8753,14 +8812,22 @@ function withGeneratedRelayFiles(profile: RelayProfile): RelayProfile {
     return {
       ...profile,
       configContents: profile.officialMixApiKey
-        ? buildRelayConfigToml(profile, { includeBearerToken: true, requiresOpenAiAuth: true })
+        ? buildRelayConfigToml(profile, {
+            includeBearerToken: true,
+            requiresOpenAiAuth: true,
+            proxyBaseUrl: getCurrentProtocolProxyBaseUrl(),
+          })
         : "",
       authContents: profile.authContents || "",
     };
   }
   return {
     ...profile,
-    configContents: buildRelayConfigToml(profile, { includeBearerToken: false, requiresOpenAiAuth: false }),
+    configContents: buildRelayConfigToml(profile, {
+      includeBearerToken: false,
+      requiresOpenAiAuth: false,
+      proxyBaseUrl: getCurrentProtocolProxyBaseUrl(),
+    }),
     authContents: buildRelayAuthJson(profile),
   };
 }
@@ -8769,7 +8836,7 @@ function buildRelayConfigToml(
   profile: Pick<RelayProfile, "model" | "baseUrl" | "upstreamBaseUrl" | "apiKey" | "protocol">,
   options: { includeBearerToken: boolean; requiresOpenAiAuth?: boolean; proxyBaseUrl?: string },
 ): string {
-  const proxyBaseUrl = options.proxyBaseUrl || PROTOCOL_PROXY_BASE_URL;
+  const proxyBaseUrl = options.proxyBaseUrl || getCurrentProtocolProxyBaseUrl();
   const baseUrl = profile.protocol === "chatCompletions" ? proxyBaseUrl : profile.baseUrl.trim();
   const apiKey = profile.apiKey.trim();
   const rootLines = [
@@ -8880,6 +8947,14 @@ function applyRelayProfilePatchToFiles(
       requiresOpenAiAuth: next.relayMode !== "pureApi",
     });
     next.configContents = removeRootTomlKey(next.configContents, CHAT_UPSTREAM_BASE_URL_KEY);
+  } else if (next.protocol === "chatCompletions" || normalizeRelayModelRoutes(next.modelRoutes).length > 0) {
+    // 其它字段保存时也校准代理 base_url，避免一直残留默认 127.0.0.1:57321。
+    next.configContents = setCodexProviderStringKey(
+      next.configContents,
+      "base_url",
+      getCurrentProtocolProxyBaseUrl(),
+      { requiresOpenAiAuth: next.relayMode !== "pureApi" },
+    );
   }
   if ("contextWindow" in patch) {
     next.configContents = setRootTomlIntKey(next.configContents, "model_context_window", patch.contextWindow || "");
