@@ -1,0 +1,385 @@
+name: Sync upstream and package
+
+# 自动同步上游 main，并在有更新或手动触发时打 Windows/macOS 包。
+# 产物上传到 GitHub Actions Artifacts；若创建/更新了 nightly 预发布，则同时挂到 Release。
+on:
+  schedule:
+    # 每天 08:20 UTC ≈ 北京时间 16:20
+    - cron: "20 8 * * *"
+  workflow_dispatch:
+    inputs:
+      force_package:
+        description: "即使没有上游更新也强制打包"
+        required: false
+        default: true
+        type: boolean
+      create_nightly_release:
+        description: "把安装包挂到 nightly 预发布（可覆盖）"
+        required: false
+        default: true
+        type: boolean
+      package_windows:
+        description: "构建 Windows 安装包"
+        required: false
+        default: true
+        type: boolean
+      package_macos:
+        description: "构建 macOS DMG"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: sync-upstream-package
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream main
+    runs-on: ubuntu-latest
+    outputs:
+      should_package: ${{ steps.decide.outputs.should_package }}
+      package_version: ${{ steps.decide.outputs.package_version }}
+      upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
+      synced: ${{ steps.decide.outputs.synced }}
+      create_nightly_release: ${{ steps.decide.outputs.create_nightly_release }}
+      package_windows: ${{ steps.decide.outputs.package_windows }}
+      package_macos: ${{ steps.decide.outputs.package_macos }}
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # 需要推回 main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add and fetch upstream
+        env:
+          UPSTREAM_REPO: BigPizzaV3/CodexPlusPlus
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch origin main
+          git fetch upstream main
+          echo "origin/main=$(git rev-parse origin/main)"
+          echo "upstream/main=$(git rev-parse upstream/main)"
+
+      - name: Merge upstream/main into local main
+        id: merge
+        run: |
+          set -euo pipefail
+          git checkout -B main origin/main
+          before="$(git rev-parse HEAD)"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "main 已包含 upstream/main"
+          else
+            # 优先快进；不能快进则 merge 保留 fork 独有提交
+            if git merge --ff-only upstream/main; then
+              echo "merge_mode=ff" >> "$GITHUB_OUTPUT"
+            else
+              git merge --no-edit upstream/main
+              echo "merge_mode=merge" >> "$GITHUB_OUTPUT"
+            fi
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+          after="$(git rev-parse HEAD)"
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "after=$after" >> "$GITHUB_OUTPUT"
+          if [ "$before" != "$after" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push main if changed
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git push origin main
+
+      - name: Decide package
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_PACKAGE: ${{ github.event.inputs.force_package }}
+          CREATE_NIGHTLY: ${{ github.event.inputs.create_nightly_release }}
+          PKG_WIN: ${{ github.event.inputs.package_windows }}
+          PKG_MAC: ${{ github.event.inputs.package_macos }}
+          CHANGED: ${{ steps.merge.outputs.changed }}
+        run: |
+          set -euo pipefail
+          # schedule：仅 upstream 有更新才打包；workflow_dispatch：默认强制打包
+          force=false
+          create_nightly=true
+          package_windows=true
+          package_macos=true
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            [ "${FORCE_PACKAGE:-true}" = "true" ] && force=true
+            [ "${CREATE_NIGHTLY:-true}" = "false" ] && create_nightly=false
+            [ "${PKG_WIN:-true}" = "false" ] && package_windows=false
+            [ "${PKG_MAC:-true}" = "false" ] && package_macos=false
+          fi
+
+          should=false
+          if [ "$force" = "true" ] || [ "$CHANGED" = "true" ]; then
+            should=true
+          fi
+
+          sha="$(git rev-parse --short=8 HEAD)"
+          date_utc="$(date -u +%Y%m%d)"
+          # 读 Cargo workspace 版本；失败则用 0.0.0
+          base_version="$(python3 -c 'import re,pathlib; t=pathlib.Path("Cargo.toml").read_text(encoding="utf-8"); m=re.search(r"(?m)^version\\s*=\\s*\"([^\"]+)\"", t); print(m.group(1) if m else "0.0.0")' 2>/dev/null || echo 0.0.0)"
+          base_version="${base_version:-0.0.0}"
+          package_version="${base_version}-nightly.${date_utc}.${sha}"
+
+          {
+            echo "should_package=$should"
+            echo "package_version=$package_version"
+            echo "upstream_sha=$(git rev-parse HEAD)"
+            echo "synced=$CHANGED"
+            echo "create_nightly_release=$create_nightly"
+            echo "package_windows=$package_windows"
+            echo "package_macos=$package_macos"
+          } >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Sync result
+          - synced/changed: \`$CHANGED\`
+          - should_package: \`$should\`
+          - package_version: \`$package_version\`
+          - head: \`$(git rev-parse HEAD)\`
+          SUMMARY
+
+  windows-artifacts:
+    name: Windows installer
+    needs: sync
+    if: needs.sync.outputs.should_package == 'true' && needs.sync.outputs.package_windows == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout packaged main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.upstream_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Install frontend dependencies
+        working-directory: apps/codex-plus-manager
+        run: npm install --package-lock=false
+
+      - name: Build frontend
+        working-directory: apps/codex-plus-manager
+        run: npm run vite:build
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Stage Windows app files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/windows/app | Out-Null
+          Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
+          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+
+      - name: Build Windows zip
+        shell: pwsh
+        run: |
+          $version = "${{ needs.sync.outputs.package_version }}"
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          Compress-Archive -Path dist/windows/app/* -DestinationPath "dist/windows/CodexPlusPlus-$version-windows-x64.zip" -Force
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $version = "${{ needs.sync.outputs.package_version }}"
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            $makensis = "makensis"
+          }
+          Push-Location scripts/installer/windows
+          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" CodexPlusPlus.nsi
+          Pop-Location
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/windows/*.exe
+            dist/windows/*.zip
+          if-no-files-found: error
+
+  macos-dmg:
+    name: macOS DMG (${{ matrix.arch }})
+    needs: sync
+    if: needs.sync.outputs.should_package == 'true' && needs.sync.outputs.package_macos == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - arch: arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout packaged main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.upstream_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: apps/codex-plus-manager
+        run: npm install --package-lock=false
+
+      - name: Build frontend
+        working-directory: apps/codex-plus-manager
+        run: npm run vite:build
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build macOS DMG
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.sync.outputs.package_version }}"
+          BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
+
+      - name: Build macOS zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.sync.outputs.package_version }}"
+          mkdir -p "dist/macos/app-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/codex-plus-plus" "dist/macos/app-${{ matrix.arch }}/"
+          cp "target/${{ matrix.target }}/release/codex-plus-plus-manager" "dist/macos/app-${{ matrix.arch }}/"
+          (cd dist/macos && zip -r "CodexPlusPlus-${VERSION}-macos-${{ matrix.arch }}.zip" "app-${{ matrix.arch }}")
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dmg
+          path: |
+            dist/macos/*.dmg
+            dist/macos/*-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  publish-nightly:
+    name: Publish nightly pre-release
+    needs:
+      - sync
+      - windows-artifacts
+      - macos-dmg
+    # 允许部分矩阵被跳过时仍发布（例如只打 Windows）
+    if: |
+      always()
+      && needs.sync.outputs.should_package == 'true'
+      && needs.sync.outputs.create_nightly_release == 'true'
+      && (needs.windows-artifacts.result == 'success' || needs.windows-artifacts.result == 'skipped')
+      && (needs.macos-dmg.result == 'success' || needs.macos-dmg.result == 'skipped')
+      && (needs.windows-artifacts.result == 'success' || needs.macos-dmg.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten package files
+        run: |
+          set -euo pipefail
+          mkdir -p dist/out
+          find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.dmg' \) -print -exec cp -f {} dist/out/ \;
+          ls -lah dist/out
+
+      - name: Create or update nightly pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.sync.outputs.package_version }}
+          SHA: ${{ needs.sync.outputs.upstream_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="nightly"
+          title="Nightly ${VERSION}"
+          body="$(cat <<BODY
+          自动同步上游并打包的预发布构建。
+
+          - version: \`${VERSION}\`
+          - commit: \`${SHA}\`
+          - workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          > 标签固定为 \`nightly\`，每次成功打包会覆盖同名预发布资源。
+          BODY
+          )"
+
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$REPO" --title "$title" --notes "$body" --prerelease --latest=false
+          else
+            gh release create "$tag" --repo "$REPO" --title "$title" --notes "$body" --prerelease --latest=false
+          fi
+
+          # 先清掉旧安装包资源，再上传新的，避免堆积
+          mapfile -t old_assets < <(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name' || true)
+          for name in "${old_assets[@]:-}"; do
+            case "$name" in
+              *.exe|*.zip|*.dmg|latest-nightly.json)
+                gh release delete-asset "$tag" "$name" --repo "$REPO" --yes || true
+                ;;
+            esac
+          done
+
+          gh release upload "$tag" dist/out/* --repo "$REPO" --clobber
+
+          # 写一份简易索引，方便下载
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+          const dir = "dist/out";
+          const files = fs.readdirSync(dir).filter((n) => !n.endsWith(".json"));
+          const version = process.env.VERSION;
+          const repo = process.env.REPO;
+          const base = `https://github.com/${repo}/releases/download/nightly`;
+          const payload = {
+            version,
+            tag: "nightly",
+            commit: process.env.SHA,
+            assets: files.map((name) => ({ name, url: `${base}/${encodeURIComponent(name)}` })),
+          };
+          fs.writeFileSync(path.join(dir, "latest-nightly.json"), `${JSON.stringify(payload, null, 2)}\n`);
+          NODE
+          gh release upload "$tag" dist/out/latest-nightly.json --repo "$REPO" --clobber
+          echo "Nightly release updated: https://github.com/${REPO}/releases/tag/nightly"
