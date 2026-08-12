@@ -503,6 +503,18 @@ pub struct BackendSettings {
     pub active_aggregate_relay_id: String,
     #[serde(rename = "relayTestModel", default = "default_relay_test_model")]
     pub relay_test_model: String,
+    #[serde(
+        rename = "protocolProxyHost",
+        default = "default_protocol_proxy_host",
+        deserialize_with = "deserialize_protocol_proxy_host"
+    )]
+    pub protocol_proxy_host: String,
+    #[serde(
+        rename = "protocolProxyPort",
+        default = "default_protocol_proxy_port",
+        deserialize_with = "deserialize_protocol_proxy_port"
+    )]
+    pub protocol_proxy_port: u16,
 }
 
 impl Default for BackendSettings {
@@ -567,11 +579,28 @@ impl Default for BackendSettings {
             aggregate_relay_profiles: Vec::new(),
             active_aggregate_relay_id: String::new(),
             relay_test_model: default_relay_test_model(),
+            protocol_proxy_host: default_protocol_proxy_host(),
+            protocol_proxy_port: default_protocol_proxy_port(),
         }
     }
 }
 
 impl BackendSettings {
+    pub fn protocol_proxy_host(&self) -> String {
+        crate::protocol_proxy::normalize_protocol_proxy_host(&self.protocol_proxy_host)
+    }
+
+    pub fn protocol_proxy_port(&self) -> u16 {
+        crate::protocol_proxy::normalize_protocol_proxy_port(self.protocol_proxy_port)
+    }
+
+    pub fn protocol_proxy_base_url(&self) -> String {
+        crate::protocol_proxy::local_responses_proxy_base_url_for(
+            &self.protocol_proxy_host(),
+            self.protocol_proxy_port(),
+        )
+    }
+
     pub fn active_relay_profile(&self) -> RelayProfile {
         if self.active_relay_id == default_active_relay_id()
             && self.relay_profiles.len() == 1
@@ -874,6 +903,31 @@ pub fn default_active_relay_id() -> String {
 
 pub fn default_relay_test_model() -> String {
     "gpt-5.4-mini".to_string()
+}
+
+pub fn default_protocol_proxy_host() -> String {
+    crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_HOST.to_string()
+}
+
+pub fn default_protocol_proxy_port() -> u16 {
+    crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT
+}
+
+fn deserialize_protocol_proxy_host<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(crate::protocol_proxy::normalize_protocol_proxy_host(&value))
+}
+
+fn deserialize_protocol_proxy_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?.unwrap_or(0);
+    let port = u16::try_from(value).unwrap_or(0);
+    Ok(crate::protocol_proxy::normalize_protocol_proxy_port(port))
 }
 
 pub fn default_relay_profiles() -> Vec<RelayProfile> {
@@ -1316,6 +1370,24 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             }),
         );
     }
+    if let Some(value) = source.get("protocolProxyHost").and_then(Value::as_str) {
+        target.insert(
+            "protocolProxyHost".to_string(),
+            Value::String(crate::protocol_proxy::normalize_protocol_proxy_host(value)),
+        );
+    }
+    if let Some(value) = source
+        .get("protocolProxyPort")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+    {
+        target.insert(
+            "protocolProxyPort".to_string(),
+            Value::Number(serde_json::Number::from(
+                crate::protocol_proxy::normalize_protocol_proxy_port(value),
+            )),
+        );
+    }
 }
 
 fn merge_bool_setting(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
@@ -1465,6 +1537,10 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
         clamp_stepwise_max_output_tokens(settings.codex_app_stepwise_max_output_tokens);
     settings.codex_app_stepwise_timeout_ms =
         clamp_stepwise_timeout_ms(settings.codex_app_stepwise_timeout_ms);
+    settings.protocol_proxy_host =
+        crate::protocol_proxy::normalize_protocol_proxy_host(&settings.protocol_proxy_host);
+    settings.protocol_proxy_port =
+        crate::protocol_proxy::normalize_protocol_proxy_port(settings.protocol_proxy_port);
     settings
 }
 

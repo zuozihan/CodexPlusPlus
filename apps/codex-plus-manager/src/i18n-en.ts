@@ -1000,6 +1000,10 @@ export const EN_BACKEND: Record<string, string> = {
   "诊断日志已写入。": "Diagnostics log written.",
   "未命名供应商": "Unnamed provider",
   "响应内容为空": "Response is empty",
+
+  "协议代理 Host": "Protocol Proxy Host",
+  "Chat Completions / 模型路由会把 Codex base_url 写成 http://Host:Helper端口/v1；默认 127.0.0.1:57321。": "Chat Completions / model routes write Codex base_url as http://Host:HelperPort/v1; default 127.0.0.1:57321.",
+  "此上游会通过本地 {0} 转成 Responses API，需要从 Codex++ 启动 Codex。": "This upstream is converted to the Responses API via local {0}; launch Codex from Codex++.",
 };
 
 // Pattern-based backend translations: [regex, replacement template].
