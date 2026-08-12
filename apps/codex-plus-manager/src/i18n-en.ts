@@ -1071,6 +1071,9 @@ export const EN_BACKEND: Record<string, string> = {
   "协议代理 Host": "Protocol Proxy Host",
   "Chat Completions / 模型路由会把 Codex base_url 写成 http://Host:Helper端口/v1；默认 127.0.0.1:57321。": "Chat Completions / model routes write Codex base_url as http://Host:HelperPort/v1; default 127.0.0.1:57321.",
   "此上游会通过本地 {0} 转成 Responses API，需要从 Codex++ 启动 Codex。": "This upstream is converted to the Responses API via local {0}; launch Codex from Codex++.",
+  "协议代理 Host 写入 config.toml（WSL/跨机请填宿主可达 IP，如 192.168.127.254）。非 127.0.0.1 时 helper 监听 0.0.0.0。默认 127.0.0.1:57321。": "Protocol proxy Host is written into config.toml (for WSL/remote use a host-reachable IP, e.g. 192.168.127.254). Non-loopback Host makes helper listen on 0.0.0.0. Default 127.0.0.1:57321.",
+  "helper 监听 0.0.0.0（WSL/局域网访问）": "Listen on 0.0.0.0 (allow WSL/LAN access)",
+  "协议代理 Host 写入 Codex base_url（WSL 填宿主可达 IP，如 192.168.127.254）。开关控制 helper 绑 127.0.0.1 或 0.0.0.0。默认关闭仅本机。": "Protocol proxy Host is written into Codex base_url (for WSL use a host-reachable IP, e.g. 192.168.127.254). Toggle binds helper to 127.0.0.1 or 0.0.0.0. Off = local only.",
 };
 
 // Pattern-based backend translations: [regex, replacement template].

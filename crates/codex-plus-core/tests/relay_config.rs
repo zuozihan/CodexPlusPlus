@@ -7,7 +7,7 @@ use codex_plus_core::relay_config::{
     chatgpt_auth_status_from_home, clear_relay_config_to_home,
     clear_relay_config_to_home_with_auth, delete_context_entry_from_common_config,
     extract_common_config_from_config, filter_common_config_for_selection,
-    list_context_entries_from_common_config, normalize_relay_profile_for_storage,
+    list_context_entries_from_common_config, normalize_relay_profile_for_storage, normalize_relay_profile_for_storage_with_proxy,
     relay_config_status_from_home, relay_profile_api_key, sanitize_common_config_contents,
     set_codex_goals_feature_in_home, strip_common_config_from_config,
     sync_live_config_context_entries, upsert_context_entry_in_common_config,
@@ -4400,3 +4400,49 @@ experimental_bearer_token = "sk-new"
     );
     assert!(!windows.contains_key("deepseek-v4-pro"));
 }
+
+#[test]
+fn normalize_storage_uses_custom_protocol_proxy_host_for_chat_completions() {
+    let mut profile = RelayProfile {
+        id: "chat".to_string(),
+        name: "chat".to_string(),
+        protocol: RelayProtocol::ChatCompletions,
+        base_url: "https://api.example.test/v1".to_string(),
+        upstream_base_url: "https://api.example.test/v1".to_string(),
+        api_key: "sk-test".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "gpt-test"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+base_url = "http://127.0.0.1:57321/v1"
+"#
+        .to_string(),
+        auth_contents: r#"{
+  "OPENAI_API_KEY": "sk-test"
+}
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    normalize_relay_profile_for_storage_with_proxy(&mut profile, "192.168.127.254", 57321).unwrap();
+    assert!(
+        profile
+            .config_contents
+            .contains(r#"base_url = "http://192.168.127.254:57321/v1""#),
+        "config_contents={}",
+        profile.config_contents
+    );
+    assert!(!profile.config_contents.contains("127.0.0.1"));
+    assert_eq!(
+        codex_plus_core::relay_config::relay_profile_base_url(&profile),
+        "https://api.example.test/v1"
+    );
+    assert!(codex_plus_core::relay_config::is_local_protocol_proxy_base_url(
+        "http://192.168.127.254:57321/v1"
+    ));
+}
+
