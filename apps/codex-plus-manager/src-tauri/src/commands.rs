@@ -719,18 +719,22 @@ fn sync_active_relay_to_home(
         anyhow::bail!("供应商配置总开关已关闭，未同步 live 配置");
     }
     let relay = settings.active_relay_profile();
+    let proxy_host = settings.protocol_proxy_host();
+    let proxy_port = settings.protocol_proxy_port();
     if relay.relay_mode == codex_plus_core::settings::RelayMode::Aggregate {
         if settings.active_aggregate_relay_profile().is_none() {
             anyhow::bail!("当前聚合供应商配置不完整");
         }
-        return codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol(
+        return codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol_host(
             home,
-            &codex_plus_core::protocol_proxy::local_responses_proxy_base_url(
-                codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+            &codex_plus_core::protocol_proxy::local_responses_proxy_base_url_for(
+                &proxy_host,
+                proxy_port,
             ),
             "codex-plus-aggregate",
             codex_plus_core::settings::RelayProtocol::Responses,
-            codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+            &proxy_host,
+            proxy_port,
         );
     }
     if relay.relay_mode == codex_plus_core::settings::RelayMode::Official
@@ -744,28 +748,32 @@ fn sync_active_relay_to_home(
         );
     }
     if relay_has_complete_files(&relay) {
-        return codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        return codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             home,
             &relay,
             &relay_combined_common_config(settings),
+            &proxy_host,
+            proxy_port,
         );
     }
 
     let mut base_url = relay.base_url.trim().to_string();
     let mut protocol = relay.protocol;
     if relay.has_model_routes() {
-        base_url = codex_plus_core::protocol_proxy::local_responses_proxy_base_url(
-            codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        base_url = codex_plus_core::protocol_proxy::local_responses_proxy_base_url_for(
+            &proxy_host,
+            proxy_port,
         );
         protocol = codex_plus_core::settings::RelayProtocol::Responses;
     }
     if relay.relay_mode == codex_plus_core::settings::RelayMode::PureApi {
-        return codex_plus_core::relay_config::apply_pure_api_config_to_home_with_protocol(
+        return codex_plus_core::relay_config::apply_pure_api_config_to_home_with_protocol_host(
             home,
             &base_url,
             &relay.api_key,
             protocol,
-            codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+            &proxy_host,
+            proxy_port,
         );
     }
 
@@ -773,12 +781,13 @@ fn sync_active_relay_to_home(
     if !auth.authenticated {
         anyhow::bail!("未检测到 ChatGPT 登录状态，已停止同步 live 配置");
     }
-    codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol(
+    codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol_host(
         home,
         &base_url,
         &relay.api_key,
         protocol,
-        codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        &proxy_host,
+        proxy_port,
     )
 }
 
@@ -4315,10 +4324,12 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
         return response;
     }
     if relay_has_complete_files(&relay) {
-        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
+            &settings.protocol_proxy_host(),
+            settings.protocol_proxy_port(),
         ) {
             Ok(result) => {
                 finish_codex_app_state_after_provider_switch(
@@ -4371,12 +4382,13 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
         );
     }
 
-    match codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol(
+    match codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol_host(
         &home,
         &relay.base_url,
         &relay.api_key,
         relay.protocol,
-        codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        &settings.protocol_proxy_host(),
+        settings.protocol_proxy_port(),
     ) {
         Ok(result) => {
             finish_codex_app_state_after_provider_switch(
@@ -4414,14 +4426,19 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
 }
 
 fn apply_aggregate_relay_injection_to_home(home: &Path) -> CommandResult<RelayPayload> {
-    match codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol(
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let proxy_host = settings.protocol_proxy_host();
+    let proxy_port = settings.protocol_proxy_port();
+    match codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol_host(
         home,
-        &codex_plus_core::protocol_proxy::local_responses_proxy_base_url(
-            codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        &codex_plus_core::protocol_proxy::local_responses_proxy_base_url_for(
+            &proxy_host,
+            proxy_port,
         ),
         "codex-plus-aggregate",
         codex_plus_core::settings::RelayProtocol::Responses,
-        codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        &proxy_host,
+        proxy_port,
     ) {
         Ok(result) => {
             let status = codex_plus_core::relay_config::relay_status_from_home(home);
@@ -4465,10 +4482,12 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
     let relay = settings.active_relay_profile();
     log_relay_apply_request("manager.apply_pure_api_injection", &settings, &relay);
     if relay_has_complete_files(&relay) {
-        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
+            &settings.protocol_proxy_host(),
+            settings.protocol_proxy_port(),
         ) {
             Ok(result) => {
                 finish_codex_app_state_after_provider_switch(
@@ -4511,12 +4530,13 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
         };
     }
 
-    match codex_plus_core::relay_config::apply_pure_api_config_to_home_with_protocol(
+    match codex_plus_core::relay_config::apply_pure_api_config_to_home_with_protocol_host(
         &home,
         &relay.base_url,
         &relay.api_key,
         relay.protocol,
-        codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        &settings.protocol_proxy_host(),
+        settings.protocol_proxy_port(),
     ) {
         Ok(result) => {
             finish_codex_app_state_after_provider_switch(
@@ -4647,7 +4667,9 @@ fn log_relay_apply_request(
             "baseUrl": relay.base_url,
             "hasConfigContents": !relay.config_contents.trim().is_empty(),
             "hasAuthContents": !relay.auth_contents.trim().is_empty(),
-            "configContainsProxy": relay.config_contents.contains("127.0.0.1:57321")
+            "configContainsProxy": relay.config_contents.contains("/v1")
+                && (relay.config_contents.contains("127.0.0.1:")
+                    || relay.config_contents.contains("localhost:"))
         }),
     );
 }

@@ -21,6 +21,8 @@ use crate::status::{LaunchStatus, StatusStore};
 
 static PET_OVERLAY_SYNC_FAILED: AtomicBool = AtomicBool::new(false);
 static PET_CURSOR_DRIVER_FAILED: AtomicBool = AtomicBool::new(false);
+static HELPER_BIND_HOST_OVERRIDE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
 
 /// Asynchronous callback used by the bridge watchdog to restore a launcher-specific bridge.
 ///
@@ -319,7 +321,9 @@ where
         let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings)
             || remote_control_provider_proxy_enabled(&settings);
         if protocol_proxy_enabled {
-            helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
+            // 协议代理启用时，helper 端口/绑定 host 与写入 config.toml 的本地代理地址保持一致。
+            helper_port = settings.protocol_proxy_port();
+            set_helper_bind_host_override(&settings.protocol_proxy_host());
         }
         if settings.enhancements_enabled || protocol_proxy_enabled {
             hooks.start_helper(helper_port).await?;
@@ -502,11 +506,30 @@ impl DefaultLaunchHooks {
 }
 
 fn helper_bind_host() -> String {
+    if let Ok(guard) = HELPER_BIND_HOST_OVERRIDE.lock() {
+        if let Some(host) = guard.as_ref() {
+            let host = host.trim();
+            if !host.is_empty() {
+                return host.to_string();
+            }
+        }
+    }
     std::env::var("CODEX_PLUS_HELPER_BIND")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn set_helper_bind_host_override(host: &str) {
+    if let Ok(mut guard) = HELPER_BIND_HOST_OVERRIDE.lock() {
+        let host = host.trim();
+        *guard = if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        };
+    }
 }
 
 #[async_trait(?Send)]
@@ -574,10 +597,12 @@ impl LaunchHooks for DefaultLaunchHooks {
             crate::relay_config::clear_relay_config_to_home_with_auth(&home, auth_contents)?;
             return Ok(());
         }
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             &home,
             &profile,
             &common_config,
+            &settings.protocol_proxy_host(),
+            settings.protocol_proxy_port(),
         )?;
         Ok(())
     }
