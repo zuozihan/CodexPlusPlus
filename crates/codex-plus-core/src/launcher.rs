@@ -25,6 +25,14 @@ const POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS: &[u64] = &[0, 5, 15, 30, 60, 120, 
 const POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
 static PET_OVERLAY_SYNC_FAILED: AtomicBool = AtomicBool::new(false);
 static PET_CURSOR_DRIVER_FAILED: AtomicBool = AtomicBool::new(false);
+static HELPER_BIND_HOST_OVERRIDE: std::sync::Mutex<Option<HelperBindOverride>> =
+    std::sync::Mutex::new(None);
+
+#[derive(Clone, Debug)]
+struct HelperBindOverride {
+    advertise_host: String,
+    listen_all: bool,
+}
 
 /// Asynchronous callback used by the bridge watchdog to restore a launcher-specific bridge.
 ///
@@ -325,7 +333,14 @@ where
         let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings)
             || remote_control_provider_proxy_enabled(&settings);
         if protocol_proxy_enabled {
-            helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
+            // 协议代理启用时：
+            // - 端口 / 对外 base_url host 用 protocolProxyHost:Port
+            // - 实际 bind 由 protocolProxyListenAll 决定（0.0.0.0 或 127.0.0.1）
+            helper_port = settings.protocol_proxy_port();
+            set_helper_bind_host_override(
+                &settings.protocol_proxy_host(),
+                settings.protocol_proxy_listen_all,
+            );
         }
         if settings.enhancements_enabled || protocol_proxy_enabled {
             hooks.start_helper(helper_port).await?;
@@ -510,12 +525,45 @@ impl DefaultLaunchHooks {
     }
 }
 
+/// helper 实际 bind 的地址。
+/// - 环境变量 `CODEX_PLUS_HELPER_BIND` 优先
+/// - 否则由开关 protocolProxyListenAll 决定：true→0.0.0.0，false→127.0.0.1
+/// config.toml 的 base_url 始终用 protocolProxyHost（对外可达地址），与 bind 解耦。
 fn helper_bind_host() -> String {
-    std::env::var("CODEX_PLUS_HELPER_BIND")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
+    if let Ok(value) = std::env::var("CODEX_PLUS_HELPER_BIND") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    if let Ok(guard) = HELPER_BIND_HOST_OVERRIDE.lock() {
+        if let Some(cfg) = guard.as_ref() {
+            return if cfg.listen_all {
+                "0.0.0.0".to_string()
+            } else {
+                "127.0.0.1".to_string()
+            };
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+fn set_helper_bind_host_override(advertise_host: &str, listen_all: bool) {
+    if let Ok(mut guard) = HELPER_BIND_HOST_OVERRIDE.lock() {
+        let host = advertise_host.trim();
+        *guard = if host.is_empty() && !listen_all {
+            None
+        } else {
+            Some(HelperBindOverride {
+                advertise_host: if host.is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    host.to_string()
+                },
+                listen_all,
+            })
+        };
+    }
 }
 
 #[async_trait(?Send)]
@@ -577,11 +625,13 @@ impl LaunchHooks for DefaultLaunchHooks {
             )?;
             return Ok(());
         }
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
+        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             &home,
             &profile,
             &common_config,
             settings.computer_use_guard_enabled,
+            &settings.protocol_proxy_host(),
+            settings.protocol_proxy_port(),
         )?;
         Ok(())
     }
@@ -652,17 +702,34 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     async fn start_helper(&self, helper_port: u16) -> anyhow::Result<()> {
         let bind_host = helper_bind_host();
+        let advertise_host = HELPER_BIND_HOST_OVERRIDE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .map(|cfg| cfg.advertise_host)
+            .filter(|host| !host.trim().is_empty())
+            .unwrap_or_else(|| {
+                if bind_host == "0.0.0.0" {
+                    "127.0.0.1".to_string()
+                } else {
+                    bind_host.clone()
+                }
+            });
         let listener = tokio::net::TcpListener::bind((bind_host.as_str(), helper_port))
             .await
             .with_context(|| {
-                format!("failed to bind helper runtime on {bind_host}:{helper_port}")
+                format!(
+                    "failed to bind helper runtime on {bind_host}:{helper_port} (advertise {advertise_host}:{helper_port})"
+                )
             })?;
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "helper.listening",
             serde_json::json!({
                 "helper_port": helper_port,
                 "bind_host": bind_host,
-                "address": format!("http://{bind_host}:{helper_port}")
+                "advertise_host": advertise_host,
+                "listen_all": bind_host == "0.0.0.0",
+                "address": format!("http://{advertise_host}:{helper_port}")
             }),
         );
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();

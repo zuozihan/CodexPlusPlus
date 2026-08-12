@@ -22,7 +22,28 @@ export type RelayModelRouteSettings = {
   relayProfiles: RelayModelRouteProfile[];
 };
 
-export const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:57321/v1";
+export const DEFAULT_PROTOCOL_PROXY_HOST = "127.0.0.1";
+export const DEFAULT_PROTOCOL_PROXY_PORT = 57321;
+export const PROTOCOL_PROXY_BASE_URL = `http://${DEFAULT_PROTOCOL_PROXY_HOST}:${DEFAULT_PROTOCOL_PROXY_PORT}/v1`;
+
+export function protocolProxyBaseUrl(
+  host: string | undefined | null = DEFAULT_PROTOCOL_PROXY_HOST,
+  port: number | string | undefined | null = DEFAULT_PROTOCOL_PROXY_PORT,
+): string {
+  const normalizedHost = String(host ?? "").trim() || DEFAULT_PROTOCOL_PROXY_HOST;
+  const parsedPort = Number(port);
+  const normalizedPort =
+    Number.isFinite(parsedPort) && parsedPort > 0 ? Math.trunc(parsedPort) : DEFAULT_PROTOCOL_PROXY_PORT;
+  return `http://${normalizedHost}:${normalizedPort}/v1`;
+}
+
+export function isProtocolProxyBaseUrl(baseUrl: string | undefined | null): boolean {
+  const value = String(baseUrl ?? "").trim().toLowerCase();
+  if (!value) return false;
+  // 与后端 is_local_protocol_proxy_base_url 对齐：任意 advertise Host 的 http://host:port/v1
+  const pathOk = value.endsWith("/v1") || value.endsWith("/v1/");
+  return pathOk && value.startsWith("http://");
+}
 
 export type RelayModelRouteIssue = {
   kind: "incomplete" | "duplicate" | "self" | "missingTarget" | "aggregateTarget" | "targetProtocol" | "targetCredentials";
@@ -103,5 +124,5 @@ export function modelRouteSaveRequiresRestart(
   // Persisted enhancement/protocol settings do not prove the already-running helper is healthy.
   // The first active route therefore always uses the restart transaction.
   if (!currentActiveHasRoutes) return true;
-  return activeLiveBaseUrl.trim() !== PROTOCOL_PROXY_BASE_URL;
+  return !isProtocolProxyBaseUrl(activeLiveBaseUrl);
 }

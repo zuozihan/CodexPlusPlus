@@ -144,11 +144,13 @@ fn apply_selected_relay_profile(
         )?
     } else {
         validate_switch_profile_files(&relay)?;
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
+        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_proxy_and_computer_use_guard(
             home,
             &relay,
             &common_config,
             settings.computer_use_guard_enabled,
+            &settings.protocol_proxy_host(),
+            settings.protocol_proxy_port(),
         )?
     };
     let status = relay_config_status_from_home(home);

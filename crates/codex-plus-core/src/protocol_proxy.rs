@@ -12,7 +12,25 @@ use serde_json::{Value, json};
 use crate::relay_rotation::{RotationContext, RotationEvent};
 use crate::settings::{RelayProtocol, SettingsStore};
 
+pub const DEFAULT_PROTOCOL_PROXY_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 57321;
+
+pub fn normalize_protocol_proxy_host(host: &str) -> String {
+    let host = host.trim();
+    if host.is_empty() {
+        DEFAULT_PROTOCOL_PROXY_HOST.to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+pub fn normalize_protocol_proxy_port(port: u16) -> u16 {
+    if port == 0 {
+        DEFAULT_PROTOCOL_PROXY_PORT
+    } else {
+        port
+    }
+}
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
@@ -127,7 +145,17 @@ impl CodexToolContext {
 }
 
 pub fn local_responses_proxy_base_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/v1")
+    local_responses_proxy_base_url_for(DEFAULT_PROTOCOL_PROXY_HOST, port)
+}
+
+pub fn local_responses_proxy_base_url_for(host: &str, port: u16) -> String {
+    let host = normalize_protocol_proxy_host(host);
+    let port = normalize_protocol_proxy_port(port);
+    format!("http://{host}:{port}/v1")
+}
+
+pub fn default_local_responses_proxy_base_url() -> String {
+    local_responses_proxy_base_url(DEFAULT_PROTOCOL_PROXY_PORT)
 }
 
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
@@ -4216,4 +4244,22 @@ fn is_openai_o_series(model: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+
+#[cfg(test)]
+mod protocol_proxy_url_tests {
+    use super::*;
+
+    #[test]
+    fn local_responses_proxy_base_url_for_uses_custom_host_port() {
+        assert_eq!(
+            local_responses_proxy_base_url_for("0.0.0.0", 18080),
+            "http://0.0.0.0:18080/v1"
+        );
+        assert_eq!(
+            local_responses_proxy_base_url_for("", 0),
+            format!("http://{DEFAULT_PROTOCOL_PROXY_HOST}:{DEFAULT_PROTOCOL_PROXY_PORT}/v1")
+        );
+    }
 }
